@@ -1,0 +1,295 @@
+#Importing data
+import numpy as np
+import pandas as pd
+surveydata = pd.read_excel (r'C:\Users\XXX.xlsx') 
+
+#Changing data types of date into date
+surveydata['latest_transaction'] = pd.to_datetime(surveydata['latest_transaction'], errors='coerce')
+surveydata['Timestamp'] = pd.to_datetime(surveydata['Timestamp'], errors='coerce')
+
+#Eliminating duplicated data
+surveydata.drop_duplicates(inplace=True)
+surveydata.dropna(inplace=True)
+surveydata.drop_duplicates(subset ="e-mail",
+                     keep = False, inplace = True)
+surveydata.info()
+hsd = surveydata
+hsd['Timestamp'].max()
+hsd.info()
+
+#Choosing 'NOW' date (as dt) into one day after the last time data was submitted
+import datetime as dt
+now = dt.datetime(2022, 1, 13)
+column = ['total_transaction', 'total_value']
+hsd = hsd.replace(0, pd.np.nan).dropna(axis=0, how='any', subset=column)
+
+
+#Transforming data into a RFM model
+rfmTable = hsd.groupby('e-mail').agg({'latest_transaction': lambda x: (now - x.max()).days,
+                                                             'total_transaction': lambda x: x,
+                                                                'total_value':  lambda x: x})
+rfmTable['avg_value'] = rfmTable['total_value']/rfmTable['total_transaction']
+rfmTable = rfmTable.drop(['total_value'], axis = 1)
+
+rfmTable.rename(columns={'latest_transaction': 'recency', 'total_transaction': 'frequency', 'avg_value': 'monetary'}, inplace=True)
+
+data_pelanggan = pd.DataFrame(hsd.groupby('e-mail')['latest_transaction'].min())
+
+#Eliminating new customer data to remove some bias
+pelanggan_baru = data_pelanggan.loc[data_pelanggan.latest_transaction > '2021-12-12']
+rfmTable = rfmTable.loc[~rfmTable.index.isin(pelanggan_baru.index)]
+
+#Univariate outlier detection
+import matplotlib.pyplot as plt
+import seaborn as sns
+sns.boxplot(x=rfmTable['recency'])
+sns.boxplot(x=rfmTable['frequency'])
+sns.boxplot(x=rfmTable['monetary'])
+
+from scipy import stats
+clean = rfmTable[(np.abs(stats.zscore(rfmTable['frequency'])) < 3 )]
+clean['frequency'].max()
+clean['recency'].max()
+clean['monetary'].max()
+clean['monetary'].min()
+o_percentage = "{:.2%}".format((len(rfmTable)-len(clean))/len(rfmTable))
+print('Persentase dari outlier pada dengan menggunakan metode z-score adalah: ', o_percentage)
+
+#Multivariate outlier detection
+import scipy as sp
+def mahalanobis(x=None, data=None, cov=None):
+        x_minus_mu = x - np.mean(data)
+        if not cov:
+            cov = np.cov(data.values.T)
+        inv_covmat = sp.linalg.inv(cov)
+        left_term = np.dot(x_minus_mu, inv_covmat)
+        mahal = np.dot(left_term, x_minus_mu.T)
+        return mahal.diagonal()
+    
+df_x = rfmTable
+df_x['mahala'] = mahalanobis(x=df_x, data=rfmTable)
+from scipy.stats import chi2
+df_x['p_value'] = 1 - chi2.cdf(df_x['mahala'], 3)
+outlier_mahalanobis = df_x.loc[df_x.p_value < 0.05]
+m_percentage = "{:.2%}".format(len(outlier_mahalanobis)/len(rfmTable))
+print('Persentase dari outlier pada dengan menggunakan metode Mahalanobis adalah: ', m_percentage)
+
+cleaned_data = rfmTable.loc[rfmTable.p_value > 0.05]
+cleaned_data_final1 = rfmTable.loc[rfmTable.frequency < 7] 
+cleaned_data_final2 = cleaned_data_final1.loc[cleaned_data_final1.recency < 8523]
+cleaned_data_final = cleaned_data_final2.loc[cleaned_data_final2.monetary < 594839] 
+cleaned_data_final = cleaned_data_final.loc[cleaned_data_final.monetary > 31250] 
+cleaned_data_final = cleaned_data_final.drop(['mahala'], axis = 1)
+cleaned_data_final = cleaned_data_final.drop(['p_value'], axis = 1)
+
+sns.boxplot(x=cleaned_data_final['recency'])
+sns.boxplot(x=cleaned_data_final['frequency'])
+sns.boxplot(x=cleaned_data_final['monetary'])
+
+#Data scaling
+from sklearn.preprocessing import StandardScaler
+sc = StandardScaler()
+cleaned = sc.fit_transform(cleaned_data_final)
+cleaned = pd.DataFrame(cleaned, index=cleaned_data_final.index, columns=cleaned_data_final.columns)
+cleaned.head()
+
+#Clustering analysis (Agglomerative Hierarchical Clustering)
+import os
+import scipy.cluster.hierarchy as shc
+from scipy import stats
+from sklearn.cluster import AgglomerativeClustering
+import plotly.express as px
+import sklearn
+import sklearn.metrics
+
+plt.figure(figsize=(10,7))
+plt.title("Dendrogram Aggloremative Hierarchical Clustering Variabel RFM")
+dend = shc.dendrogram(shc.linkage(cleaned, method='ward'))
+copy_cleaned = cleaned
+
+#Clustering analysis (K-Means Clustering)
+from sklearn.cluster import KMeans
+combination = KMeans(n_clusters=4, max_iter=300,  random_state=10).fit(cleaned)
+copy_cleaned['cluster_kombinasi'] = combination.labels_
+fig = px.scatter_3d(copy_cleaned, x='recency', y='frequency', z='monetary', color='cluster_kombinasi')
+fig.show()
+
+
+cleaned_clustered = pd.merge(cleaned_data_final, copy_cleaned[['cluster_kombinasi']], on = 'e-mail', how = 'left')
+import pandas as pd
+cleaned_clustered_sorted = cleaned_clustered.sort_values(["cluster_kombinasi"], ascending=True)
+cleaned_clustered_sorted.to_excel(r'C:\Users\User\.xlsx', index = False)
+import sklearn.metrics
+
+#Evaluating the result of the clustering analysis
+from sklearn.metrics import silhouette_score
+from sklearn.metrics import davies_bouldin_score
+print("Nilai Silhouette Width untuk cluster dengan algoritma kombinasi: ", silhouette_score(cleaned, combination.labels_))
+print("Nilai DBI untuk cluster dengan algoritma kombinasi: ", davies_bouldin_score(cleaned, combination.labels_))
+
+cluster1 = copy_cleaned.query('cluster_kombinasi == 0')
+cluster2 = copy_cleaned.query('cluster_kombinasi == 1')
+cluster3 = copy_cleaned.query('cluster_kombinasi == 2')
+cluster4 = copy_cleaned.query('cluster_kombinasi == 3')
+
+cluster1_merged = pd.merge(hsd, cluster1, on="e-mail")
+cluster2_merged = pd.merge(hsd, cluster2, on="e-mail")
+cluster3_merged = pd.merge(hsd, cluster3, on="e-mail")
+cluster4_merged = pd.merge(hsd, cluster4, on="e-mail")
+
+cluster1_fixed = cluster1_merged.loc[:, cluster1_merged.columns.intersection(['age','gender', 'domicile', 'status', 'occupation', 'monthly_expenses'])]
+cluster2_fixed = cluster2_merged.loc[:, cluster2_merged.columns.intersection(['age','gender', 'domicile', 'status', 'occupation', 'monthly_expenses'])]
+cluster3_fixed = cluster3_merged.loc[:, cluster3_merged.columns.intersection(['age','gender', 'domicile', 'status', 'occupation', 'monthly_expenses'])]
+cluster4_fixed = cluster4_merged.loc[:, cluster4_merged.columns.intersection(['age','gender', 'domicile', 'status', 'occupation', 'monthly_expenses'])]
+
+#Comprehensive data analysis of the clustering based on the previous results
+import pandas as pd
+gender_cat = pd.get_dummies(cluster1_fixed.gender, prefix='Gender')
+status_cat = pd.get_dummies(cluster1_fixed.status, prefix='Status')
+occupation_cat = pd.get_dummies(cluster1_fixed.occupation, prefix='Occupation')
+
+cluster1_OHE_gender = cluster1_fixed.join(gender_cat)
+cluster1_OHE_status = cluster1_OHE_gender.join(status_cat)
+cluster1_OHE = cluster1_OHE_status.join(occupation_cat)
+
+kotabesar_cat = ["Jakarta", "Surabaya", "Bekasi", "Bandung", "Karawang", "Bogor", "Medan", "Sidoarjo", "Semarang", "Makassar", "Tangerang", "Batam", "Pasuruan", "Palembang", "Balikpapan", "Kudus", "Malang", "Mojokerto", "Serang", "Depok", "Purwakarta", "Sukabumi", "Garut", "Denpasar", "Cirebon", "Bandung Barat", "Lampung", "Subang", "Yogyakarta", "Tegal"]
+kotakecil_cat = ["Probolinggo", "Sumedang", "Blitar", "Brebes", "Boyolali", "Tulungagung", "Balangan", "Banjarnegara", "Batulicin", "Solo", "Ngawi", "Pacitan", "Banda Aceh", "Grobogan", "Cianjur", "Jambi", "Palu", "Belitung", "Karimun", "Purbalingga", "Situbondo", "Gianyar", "Ponorogo", "Ketapang", "Cimahi", "Pontianak", "Tasikmalaya", "Temanggung", "Pemalang", "Bojonegoro"]
+
+cluster1_OHE['Domicile_Kotabesar'] = (cluster1_OHE['domicile']).apply(lambda x: 1 if x in kotabesar_cat else 0)
+cluster1_OHE['Domicile_Kotakecil'] = (cluster1_OHE['domicile']).apply(lambda x: 1 if x in kotakecil_cat else 0) 
+
+# Import label encoder 
+from sklearn.preprocessing import LabelEncoder
+# creating instance of labelencoder
+labelencoder = LabelEncoder()
+
+# Assigning numerical values and storing in another column
+cluster1_OHE['age'] = labelencoder.fit_transform(cluster1_OHE['age'])
+cluster1_OHE['monthly_expenses'] = labelencoder.fit_transform(cluster1_OHE['monthly_expenses'])
+cluster1_fixed = cluster1_OHE.drop(['gender', 'domicile', 'status', 'occupation'], axis = 1)
+plt.figure(figsize=(10,7))
+plt.title("Dendrogram Aggloremative Hierarchical Clustering - Demographic Cluster 1")
+dend = shc.dendrogram(shc.linkage(cluster1_fixed, method='ward'))
+
+copy_cluster1_fixed = cluster1_fixed
+
+from sklearn.cluster import KMeans
+combination_cluster1 = KMeans(n_clusters=5, max_iter=300,  random_state=10).fit(cluster1_fixed)
+copy_cluster1_fixed['cluster_kombinasi'] = combination_cluster1.labels_
+
+import pandas as pd
+cluster1_sorted = copy_cluster1_fixed.sort_values(["cluster_kombinasi"], ascending=True)
+cluster1_sorted
+print("Nilai Silhouette Width untuk cluster 1 dengan algoritma kombinasi: ", silhouette_score(cluster1_fixed, combination_cluster1.labels_))
+
+import pandas as pd
+gender_cat = pd.get_dummies(cluster2_fixed.gender, prefix='Gender')
+status_cat = pd.get_dummies(cluster2_fixed.status, prefix='Status')
+occupation_cat = pd.get_dummies(cluster2_fixed.occupation, prefix='Occupation')
+
+cluster2_OHE_gender = cluster2_fixed.join(gender_cat)
+cluster2_OHE_status = cluster2_OHE_gender.join(status_cat)
+cluster2_OHE = cluster2_OHE_status.join(occupation_cat)
+
+cluster2_OHE['Domicile_Kotabesar'] = (cluster2_OHE['domicile']).apply(lambda x: 1 if x in kotabesar_cat else 0)
+cluster2_OHE['Domicile_Kotakecil'] = (cluster2_OHE['domicile']).apply(lambda x: 1 if x in kotakecil_cat else 0)
+
+# Import label encoder 
+from sklearn.preprocessing import LabelEncoder
+# creating instance of labelencoder
+labelencoder = LabelEncoder()
+
+# Assigning numerical values and storing in another column
+cluster2_OHE['age'] = labelencoder.fit_transform(cluster2_OHE['age'])
+cluster2_OHE['monthly_expenses'] = labelencoder.fit_transform(cluster2_OHE['monthly_expenses'])
+
+cluster2_fixed = cluster2_OHE.drop(['gender', 'domicile', 'status', 'occupation'], axis = 1)
+plt.figure(figsize=(10,7))
+plt.title("Dendrogram Aggloremative Hierarchical Clustering - Demographic Cluster 2")
+dend = shc.dendrogram(shc.linkage(cluster2_fixed, method='ward'))
+
+copy_cluster2_fixed = cluster2_fixed
+
+from sklearn.cluster import KMeans
+combination_cluster2 = KMeans(n_clusters=3, max_iter=300,  random_state=10).fit(cluster2_fixed)
+copy_cluster2_fixed['cluster_kombinasi'] = combination_cluster2.labels_
+
+import pandas as pd
+cluster2_sorted = copy_cluster2_fixed.sort_values(["cluster_kombinasi"], ascending=True)
+cluster2_sorted
+print("Nilai Silhouette Width untuk cluster 2 dengan algoritma kombinasi: ", silhouette_score(cluster2_fixed, combination_cluster2.labels_))
+
+import pandas as pd
+gender_cat = pd.get_dummies(cluster3_fixed.gender, prefix='Gender')
+status_cat = pd.get_dummies(cluster3_fixed.status, prefix='Status')
+occupation_cat = pd.get_dummies(cluster3_fixed.occupation, prefix='Occupation')
+
+cluster3_OHE_gender = cluster3_fixed.join(gender_cat)
+cluster3_OHE_status = cluster3_OHE_gender.join(status_cat)
+cluster3_OHE = cluster3_OHE_status.join(occupation_cat)
+
+cluster3_OHE['Domicile_Kotabesar'] = (cluster3_OHE['domicile']).apply(lambda x: 1 if x in kotabesar_cat else 0)
+cluster3_OHE['Domicile_Kotakecil'] = (cluster3_OHE['domicile']).apply(lambda x: 1 if x in kotakecil_cat else 0) 
+
+# Import label encoder 
+from sklearn.preprocessing import LabelEncoder
+# creating instance of labelencoder
+labelencoder = LabelEncoder()
+
+# Assigning numerical values and storing in another column
+cluster3_OHE['age'] = labelencoder.fit_transform(cluster3_OHE['age'])
+cluster3_OHE['monthly_expenses'] = labelencoder.fit_transform(cluster3_OHE['monthly_expenses'])
+
+cluster3_fixed = cluster3_OHE.drop(['gender', 'domicile', 'status', 'occupation'], axis = 1)
+plt.figure(figsize=(10,7))
+plt.title("Dendrogram Aggloremative Hierarchical Clustering - Demographic Cluster 3")
+dend = shc.dendrogram(shc.linkage(cluster3_fixed, method='ward'))
+
+copy_cluster3_fixed = cluster3_fixed
+
+from sklearn.cluster import KMeans
+combination_cluster3 = KMeans(n_clusters=4, max_iter=300,  random_state=10).fit(cluster3_fixed)
+copy_cluster3_fixed['cluster_kombinasi'] = combination_cluster3.labels_
+
+import pandas as pd
+cluster3_sorted = copy_cluster3_fixed.sort_values(["cluster_kombinasi"], ascending=True)
+cluster3_sorted
+print("Nilai Silhouette Width untuk cluster 3 dengan algoritma kombinasi: ", silhouette_score(cluster3_fixed, combination_cluster3.labels_))
+
+import pandas as pd
+gender_cat = pd.get_dummies(cluster4_fixed.gender, prefix='Gender')
+status_cat = pd.get_dummies(cluster4_fixed.status, prefix='Status')
+occupation_cat = pd.get_dummies(cluster4_fixed.occupation, prefix='Occupation')
+
+cluster4_OHE_gender = cluster4_fixed.join(gender_cat)
+cluster4_OHE_status = cluster4_OHE_gender.join(status_cat)
+cluster4_OHE = cluster4_OHE_status.join(occupation_cat)
+
+cluster4_OHE['Domicile_Kotabesar'] = (cluster4_OHE['domicile']).apply(lambda x: 1 if x in kotabesar_cat else 0)
+cluster4_OHE['Domicile_Kotakecil'] = (cluster4_OHE['domicile']).apply(lambda x: 1 if x in kotakecil_cat else 0) 
+
+# Import label encoder 
+from sklearn.preprocessing import LabelEncoder
+# creating instance of labelencoder
+labelencoder = LabelEncoder()
+
+# Assigning numerical values and storing in another column
+cluster4_OHE['age'] = labelencoder.fit_transform(cluster4_OHE['age'])
+cluster4_OHE['monthly_expenses'] = labelencoder.fit_transform(cluster4_OHE['monthly_expenses'])
+
+cluster4_fixed = cluster4_OHE.drop(['gender', 'domicile', 'status', 'occupation'], axis = 1)
+
+plt.figure(figsize=(10,7))
+plt.title("Dendrogram Aggloremative Hierarchical Clustering - Demographic Cluster 4")
+dend = shc.dendrogram(shc.linkage(cluster4_fixed, method='ward'))
+
+copy_cluster4_fixed = cluster4_fixed
+
+from sklearn.cluster import KMeans
+combination_cluster4 = KMeans(n_clusters=3, max_iter=300,  random_state=10).fit(cluster4_fixed)
+copy_cluster4_fixed['cluster_kombinasi'] = combination_cluster4.labels_
+
+import pandas as pd
+cluster4_sorted = copy_cluster4_fixed.sort_values(["cluster_kombinasi"], ascending=True)
+cluster4_sorted
+print("Nilai Silhouette Width untuk cluster 4 dengan algoritma kombinasi: ", silhouette_score(cluster4_fixed, combination_cluster4.labels_))
